@@ -1,0 +1,5 @@
+python-dotenv==0.21.0
+python-crontab==2.6.0
+python_telegram_bot==20.0a4
+PyYAML==6.0
+SQLAlchemy==1.4.41

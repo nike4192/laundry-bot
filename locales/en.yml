@@ -1,0 +1,9 @@
+# EN
+commands:
+  start: 'Start conversation with bot'
+  auth: 'Authorization with order number'
+  book: 'Book a washing machine'
+  remind: 'Remind about appointments'
+  my: 'My current appointments'
+  summary: '[Moderator] Summary appointments by dates'
+  today: '[Moderator] Today appointments'
