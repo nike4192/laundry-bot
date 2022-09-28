@@ -49,6 +49,12 @@ WASHER_IS_ALREADY_BOOKED, \
 WASHER_IS_NOT_AVAILABLE, \
 APPOINTMENT_IS_PASSED = range(0, 4)
 
+WASHER_REASON_LOCALE_MAP = {
+    WASHER_IS_NOT_AVAILABLE: 'washer_is_not_available',
+    WASHER_IS_ALREADY_BOOKED: 'washer_is_already_booked',
+    APPOINTMENT_IS_PASSED: 'appointment_is_passed'
+}
+
 WASHER_SIGN_CHARS = {  # not_available, available
     WASHER_IS_AVAILABLE:      [None, None],
     WASHER_IS_ALREADY_BOOKED: ['❌', '✅'],

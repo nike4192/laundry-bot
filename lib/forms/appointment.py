@@ -1,16 +1,16 @@
 
-from datetime import datetime
+from datetime import datetime, date, time
 
 import locales
 import lib.misc as misc
 import lib.constants as const
 from lib.misc import append_locale_arg
 from lib.forms.base import BaseAction, BaseForm
-from lib.models import session, User, AppointmentData, Appointment, Washer
+from lib.models import session, User, AppointmentData, Appointment, Washer, Message
 
-from sqlalchemy import select
-from datetime import date, timedelta, time
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from sqlalchemy import func
+from sqlalchemy.future import select
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 
 
 class DateAppointmentAction(BaseAction):
@@ -18,24 +18,24 @@ class DateAppointmentAction(BaseAction):
         super().__init__('Дата', 'Выберите дату')
 
     @staticmethod
-    def is_available_slot(user: User, data: AppointmentData, value: str):
+    async def is_available_slot(user: User, data: AppointmentData, value: str):
         tmp = data.book_date
         data.book_date = date.fromisoformat(value)
 
         slots = [
-            TimeAppointmentAction.is_available_slot(user, data, t.isoformat())
+            await TimeAppointmentAction.is_available_slot(user, data, t.isoformat())
             for t in const.available_time
         ]
 
         data.book_date = tmp  # Required after temporarily changes
         return misc.aggregate_appointment_slots(slots)
 
-    def reply_markup(self, user: User, data: AppointmentData, state: int):
+    async def reply_markup(self, user: User, data: AppointmentData, state: int):
         available_dates = list(misc.gen_available_dates(user.role))
 
         keyboard = []
         for d in available_dates:
-            is_available, reason = self.is_available_slot(user, data, d.isoformat())
+            is_available, reason = await self.is_available_slot(user, data, d.isoformat())
             sign_char = const.WASHER_SIGN_CHARS[reason][is_available]
             keyboard_button = InlineKeyboardButton(
                     (sign_char + ' ' if sign_char else '') +
@@ -48,11 +48,11 @@ class DateAppointmentAction(BaseAction):
         return misc.date_to_str(data.book_date)
 
     @append_locale_arg('appointment_form', 'date_action')
-    def button_handler(self, user: User, data: AppointmentData, value: str, locale: dict) -> tuple[bool, str]:
-        is_available, reason = self.is_available_slot(user, data, value)
+    async def button_handler(self, user: User, data: AppointmentData, value: str, locale: dict) -> tuple[bool, str]:
+        is_available, reason = await self.is_available_slot(user, data, value)
         if is_available:
             data.book_date = date.fromisoformat(value)
-            session.commit()
+            await session.commit()
             return True, ''
         else:
             if reason == const.WASHER_IS_ALREADY_BOOKED:
@@ -66,13 +66,13 @@ class TimeAppointmentAction(BaseAction):
         super().__init__('Время', 'Выберите время')
 
     @staticmethod
-    def is_available_slot(user: User, data: AppointmentData, value: str):
-        washers = session.scalars(select(Washer)).all()
+    async def is_available_slot(user: User, data: AppointmentData, value: str):
+        washers = (await session.scalars(select(Washer))).all()
 
         tmp = data.book_time
         data.book_time = time.fromisoformat(value)
         slots = [
-            WashersAppointmentAction.is_available_slot(user, data, washer.id)
+            (await WashersAppointmentAction.is_available_slot(user, data, washer.id))[:2]
             for washer in washers
         ]
 
@@ -80,13 +80,13 @@ class TimeAppointmentAction(BaseAction):
 
         return misc.aggregate_appointment_slots(slots)
 
-    def reply_markup(self, user: User, data: AppointmentData, state: int):
+    async def reply_markup(self, user: User, data: AppointmentData, state: int):
         keyboard = []
         now_dt = datetime.now()
         for t in const.available_time:
             book_dt = datetime.combine(data.book_date, t)
             if now_dt < book_dt:
-                is_available, reason = self.is_available_slot(user, data, t.isoformat())
+                is_available, reason = await self.is_available_slot(user, data, t.isoformat())
                 sign_char = const.WASHER_SIGN_CHARS[reason][is_available]
                 keyboard_button = InlineKeyboardButton(
                     (sign_char + ' ' if sign_char else '') +
@@ -101,11 +101,11 @@ class TimeAppointmentAction(BaseAction):
         return misc.time_to_str(data.book_time)
 
     @append_locale_arg('appointment_form', 'time_action')
-    def button_handler(self, user: User, data: AppointmentData, value: str, locale: dict) -> tuple[bool, str]:
-        is_available, reason = self.is_available_slot(user, data, value)
+    async def button_handler(self, user: User, data: AppointmentData, value: str, locale: dict) -> tuple[bool, str]:
+        is_available, reason = await self.is_available_slot(user, data, value)
         if is_available:
             data.book_time = time.fromisoformat(value)
-            session.commit()
+            await session.commit()
             return True, ''
         else:
             if reason == const.WASHER_IS_ALREADY_BOOKED:
@@ -118,12 +118,12 @@ class WashersAppointmentAction(BaseAction):
     def __init__(self):
         super().__init__('Стиральные машины', 'Выберите стиральные машины')
 
-    def reply_markup(self, user: User, data: AppointmentData, state: int):
-        washers = session.scalars(select(Washer)).all()
+    async def reply_markup(self, user: User, data: AppointmentData, state: int):
+        washers = (await session.scalars(select(Washer))).all()
 
         keyboard = []
         for washer in washers:
-            is_available, reason = self.is_available_slot(user, data, washer.id)
+            is_available, reason = (await self.is_available_slot(user, data, washer.id))[:2]
             sign_char = const.WASHER_SIGN_CHARS[reason][is_available]
             keyboard_button = InlineKeyboardButton(
                 (sign_char + ' ' if sign_char else '') + washer.name,
@@ -139,66 +139,56 @@ class WashersAppointmentAction(BaseAction):
             return '...'
 
     @staticmethod
-    def is_available_slot(user: User, data: AppointmentData, value):
-        stmt = select(Appointment).filter(
+    async def is_available_slot(user: User, data: AppointmentData, value):
+        stmt = select(Appointment).where(
             Appointment.book_date == data.book_date,
             Appointment.book_time == data.book_time,
-            Appointment.washer_id == int(value)
-        )
-        appointment = session.scalars(stmt).one_or_none()
+            Appointment.washer_id == int(value))
+        appointment = (await session.scalars(stmt)).one_or_none()
         if not appointment:
-            washer = session.scalars(
-                select(Washer).where(Washer.id == int(value))).one()
+            washer = await session.get(Washer, int(value))
             if not washer.available:
-                return False, const.WASHER_IS_NOT_AVAILABLE
+                return False, const.WASHER_IS_NOT_AVAILABLE, None
             else:
-                return True, const.WASHER_IS_AVAILABLE
+                return True, const.WASHER_IS_AVAILABLE, None
         else:
             if appointment.passed:
-                return False, const.APPOINTMENT_IS_PASSED
+                return False, const.APPOINTMENT_IS_PASSED, None
             else:
-                return appointment.user_id == user.id,\
-                       const.WASHER_IS_ALREADY_BOOKED
+                return appointment.user_id == user.id, \
+                       const.WASHER_IS_ALREADY_BOOKED, \
+                       (appointment if appointment.user_id == user.id else None)
 
     @append_locale_arg('appointment_form', 'washer_action')
-    def button_handler(self, user: User, data: AppointmentData, value: str, locale: dict) -> tuple[bool, str]:
-        is_available, reason = self.is_available_slot(user, data, value)
+    async def button_handler(self, user: User, data: AppointmentData, value: str, locale: dict) -> tuple[bool, str]:
+        is_available, reason, appointment = await self.is_available_slot(user, data, value)
 
         if is_available:
             if reason == const.WASHER_IS_AVAILABLE:
-                planned_appointments = [a
-                    for a in user.appointments
-                    if not a.passed and not a.rejected_at]
-                if len(planned_appointments) >= const.max_book_washers:
+                stmt = select(func.count()) \
+                    .where(
+                        Appointment.user_id == user.id,
+                        Appointment.passed == False)
+                planned_appointments_count = (await session.scalars(stmt)).one()
+                if planned_appointments_count >= const.max_book_washers:
                     return False, locale['max_book_washers'] % const.max_book_washers
-                stmt = select(Washer).where(Washer.id == int(value))
-                washer = session.scalars(stmt).one()
                 session.add(
                     Appointment(
                         user=user,
                         data=data,
                         book_date=data.book_date,
                         book_time=data.book_time,
-                        washer=washer))
-                session.commit()
+                        washer_id=int(value)))
+                await session.commit()
                 return True, ''
             elif reason == const.WASHER_IS_ALREADY_BOOKED:
-                stmt = select(Appointment).filter(
-                    Appointment.book_date == data.book_date,
-                    Appointment.book_time == data.book_time,
-                    Appointment.washer_id == int(value)
-                )
-                appointment = session.scalars(stmt).one_or_none()  # Add if cond ?
-                session.delete(appointment)
-                session.commit()
+                await session.delete(appointment)
+                await session.commit()
+                await session.refresh(data)  # Update relationships
                 return True, ''
         else:  # Not available
-            if reason == const.WASHER_IS_NOT_AVAILABLE:
-                return False, locale['washer_is_not_available']
-            if reason == const.WASHER_IS_ALREADY_BOOKED:
-                return False, locale['washer_is_already_booked']
-            if reason == const.APPOINTMENT_IS_PASSED:
-                return False, locale['appointment_is_passed']
+            locale_key = const.WASHER_REASON_LOCALE_MAP[reason]
+            return False, locale[locale_key]
 
 
 class AppointmentForm(BaseForm):
@@ -208,29 +198,27 @@ class AppointmentForm(BaseForm):
         WashersAppointmentAction()
     ]
 
+    __data_class__ = AppointmentData
+
     passed_text = locales.ru['appointment_form']['passed_title']
     closed_text = locales.ru['appointment_form']['closed_title']
     finished_text = locales.ru['appointment_form']['finished_title']
 
-    def __init__(self, user: User, data: AppointmentData = None):
-        if data is None:
-            data = AppointmentData()
-            session.add(data)
-            session.commit()
+    def __init__(self, user: User, data: AppointmentData):
         super().__init__(user, data)
 
-    def find_exists_datas(self, data: AppointmentData):
-        stmt = select(AppointmentData).where(
-            AppointmentData.book_date == data.book_date,
-            AppointmentData.book_time == data.book_time,
-            AppointmentData.state == data.state
-        )
-        return [d
-            for d in session.scalars(stmt).all()
-            if  d.message_id is not None and
-                d.message.user == self.user and
-                d != data
-        ]
+    async def find_exists_datas(self, data: AppointmentData):
+        stmt = select(AppointmentData) \
+            .where(
+                AppointmentData.book_date == data.book_date,
+                AppointmentData.book_time == data.book_time,
+                AppointmentData.state == data.state) \
+            .where(
+                AppointmentData.message_id == Message.id,
+                Message.user_id == self.user.id,
+                AppointmentData.id != data.id)
+
+        return (await session.scalars(stmt)).unique().all()
 
     @property
     def finished(self):

@@ -1,5 +1,8 @@
+
+from sqlalchemy.orm import selectinload
+
 from lib.constants import UserRole
-from lib.models import session, User, AppointmentData, SummaryData
+from lib.models import async_session, session, User, AppointmentData, SummaryData
 from lib.misc import timedelta_to_str
 from lib.forms.appointment import AppointmentForm
 
@@ -13,12 +16,19 @@ from app import application
 
 async def main():
     now_dt = datetime.now()
-    now_rdt = now_dt - timedelta(seconds=now_dt.second,
-                                microseconds=now_dt.microsecond)
+    now_rdt = now_dt - \
+        timedelta(seconds=now_dt.second,
+                  microseconds=now_dt.microsecond)
 
     # REMIND ALL MODERATORS
-    stmt = select(User).where(User.role == UserRole.moderator)
-    for moderator in session.scalars(stmt).all():
+    stmt = select(User) \
+        .where(
+            User.role == UserRole.moderator) \
+        .options(
+            selectinload(User.reminders))
+
+    moderators = (await session.scalars(stmt)).unique().all()
+    for moderator in moderators:
         for reminder in moderator.reminders:
             reminder_td = timedelta(seconds=reminder.seconds)
             book_rdt = now_rdt + reminder_td
@@ -26,11 +36,11 @@ async def main():
                 AppointmentData.book_date == book_rdt.date(),
                 AppointmentData.book_time == book_rdt.time()
             )
-            appointments_count = session.scalars(stmt).one_or_none()
+            appointments_count = (await session.scalars(stmt)).unique().one_or_none()
             if appointments_count:
                 stmt = select(SummaryData) \
                     .where(SummaryData.summary_date == book_rdt.date())
-                for summary_data in session.scalars(stmt).all():
+                for summary_data in (await session.scalars(stmt)).unique().all():
                     if summary_data.message_id is not None:
                         await application.bot.send_message(
                             chat_id=summary_data.message.user.chat_id,
@@ -41,13 +51,17 @@ async def main():
                         )
 
     # REMIND ALL USERS
-    stmt = select(AppointmentData).where(
-        AppointmentData.book_date is not None,
-        AppointmentData.book_time is not None
-    )
+    stmt = select(AppointmentData) \
+        .where(
+            AppointmentData.book_date is not None,
+            AppointmentData.book_time is not None,
+            AppointmentData.message) \
+        .options(
+            selectinload(AppointmentData.message))
 
     expired_datas = []
-    for data in session.scalars(stmt).all():
+    datas = (await session.scalars(stmt)).unique().all()
+    for data in datas:
         if data.message_id is not None and bool(data.appointments):
             book_dt = datetime.combine(data.book_date, data.book_time)
             if now_rdt >= book_dt:  # EXPIRED

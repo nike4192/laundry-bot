@@ -6,7 +6,7 @@ from sqlalchemy import select, func
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from lib import misc
-from lib.models import User, SummaryData, AppointmentData, session, Appointment
+from lib.models import session, User, SummaryData, AppointmentData, Appointment, Message
 from lib.forms.base import BaseMessage, BaseAction, BaseForm
 
 
@@ -14,17 +14,17 @@ class SummaryDateAction(BaseAction, BaseMessage):
     def __init__(self):
         super().__init__('Дата', 'Выберите дату')
 
-    def text(self, data: SummaryData):
+    async def text(self, data: SummaryData):
         return '📅 ' + self.action_text
 
-    def reply_markup(self, user: User, data: SummaryData, state: int):
+    async def reply_markup(self, user: User, data: SummaryData, state: int):
         keyboard = []
         available_dates = list(misc.gen_available_dates(user.role))
 
         stmt = select(func.count()) \
             .where(Appointment.book_date.in_(available_dates)) \
             .group_by(Appointment.book_date)
-        appointment_group_counts = session.scalars(stmt).all()
+        appointment_group_counts = (await session.scalars(stmt)).unique().all()
 
         for d, appointments_count in zip_longest(available_dates, appointment_group_counts):
             date_str = misc.date_button_to_str(d)
@@ -35,7 +35,7 @@ class SummaryDateAction(BaseAction, BaseMessage):
             keyboard.append([keyboard_button])
         return InlineKeyboardMarkup(keyboard)
 
-    def button_handler(self, user: User, data: SummaryData, value: str) -> tuple[bool, str]:
+    async def button_handler(self, user: User, data: SummaryData, value: str) -> tuple[bool, str]:
         data.summary_date = date.fromisoformat(value)
         return True, ''
 
@@ -44,17 +44,17 @@ class SummaryInfoMessage(BaseMessage):
 
     parse_mode = 'MarkdownV2'
 
-    def text(self, data: SummaryData):
+    async def text(self, data: SummaryData):
         summary_date = data.summary_date
 
         stmt = select(AppointmentData) \
-            .filter(
+            .where(
                 AppointmentData.book_date == summary_date) \
             .order_by(
                 AppointmentData.book_date,
                 AppointmentData.book_time)
 
-        datas = session.scalars(stmt).all()
+        datas = (await session.scalars(stmt)).unique().all()
 
         # book_date
         msg_txt = misc.md2_escape(misc.date_to_str(summary_date)) + '\n\n'
@@ -89,30 +89,18 @@ class SummaryForm(BaseForm):
         SummaryInfoMessage()
     ]
 
-    def __init__(self, user: User, data: SummaryData = None):
-        if data is None:
-            data = SummaryData()
-            session.add(data)
-            session.commit()
+    __data_class__ = SummaryData
+
+    def __init__(self, user: User, data: SummaryData):
         super().__init__(user, data)
-        print(self.data, self.data.state)
 
+    async def find_exists_datas(self, data: SummaryData):
+        stmt = select(SummaryData) \
+            .where(
+                SummaryData.summary_date == data.summary_date) \
+            .where(
+                SummaryData.message_id == Message.id,
+                Message.user_id == self.user.id,
+                SummaryData.id != data.id)
 
-    def find_exists_datas(self, data: SummaryData):
-        stmt = select(SummaryData).where(
-            SummaryData.summary_date == data.summary_date)
-        return [d
-            for d in session.scalars(stmt).all()
-            if  d.message_id is not None and
-                d.message.user == self.user and
-                d != data
-        ]
-
-    def text(self):
-        if issubclass(self.active_action.__class__, BaseMessage):
-            if self.closed:
-                return '⌛'  # Sticker in MarkdownV2
-            else:
-                return self.active_action.text(self.data)
-        else:
-            return super(SummaryForm, self).text()
+        return (await session.execute(stmt)).scalars().all()

@@ -1,11 +1,7 @@
 
-import os
 import re
-import html
-import json
 import asyncio
 import logging
-import traceback
 from datetime import datetime
 
 import lib.constants as const
@@ -13,14 +9,13 @@ from lib.misc import append_locale_arg
 from lib.forms.appointment import AppointmentForm
 from lib.forms.reminder import ReminderForm
 from lib.forms.summary import SummaryForm
-from lib.models import session, User, Message, AppointmentData, SummaryData, UserRole
+from lib.models import session, User, Message, AppointmentData, SummaryData, UserRole, ReminderData, Appointment
 from lib.middlewares import auth_user_middleware, message_form_middleware, user_permission_middleware
 from lib.authorization import authorize
 
 from sqlalchemy import select
 
 from telegram import Update
-from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 
 logger = logging.getLogger(__name__)
@@ -47,7 +42,11 @@ async def book(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = context.user_data
     auth_user = user_data['auth_user']
     if auth_user:
-        message_form = AppointmentForm(auth_user)
+        data = AppointmentData()
+        session.add(data)
+        await session.commit()
+
+        message_form = AppointmentForm(auth_user, data)
         await message_form.reply(update, context)
 
         user_data['message_form'] = message_form
@@ -73,7 +72,7 @@ async def auth(update: Update, context: ContextTypes.DEFAULT_TYPE, locale: dict)
         )
 
     order_number = auth_user_args[-1]
-    auth_user, reason = authorize(
+    auth_user, reason = await authorize(
         first_name, last_name, order_number,
         from_user.username, update.effective_message.chat_id)
 
@@ -108,31 +107,36 @@ async def callback_query_button(update: Update, context: ContextTypes.DEFAULT_TY
 
     state, value = query.data.split(' ')
     message_form.data.state = int(state)
-    message_form.button_handler(update, context, value)
+    await message_form.button_handler(update, context, value)
     await message_form.update_message(update, context)
 
     data = message_form.data
     if isinstance(data, AppointmentData):
         if data.state == len(message_form.actions) - 1:
             # Update appointment forms for other users
-            stmt = select(AppointmentData).where(
-                AppointmentData.id != data.id)
-            await asyncio.gather(*[
-                AppointmentForm(data.message.user, data).update_message(update, context)
-                for data in session.scalars(stmt).all()
-                if data.message_id is not None
-            ])
+            stmt = select(AppointmentData, User).where(
+                AppointmentData.id != data.id,
+                AppointmentData.message_id == Message.id,
+                Message.user_id == User.id)
+
+            appointment_gather = [
+                AppointmentForm(user, data).update_message(update, context)
+                for data, user in (await session.execute(stmt)).unique()
+            ]
             # Update summary forms for moderators
-            summary_datas = session.query(SummaryData) \
+            stmt = select(SummaryData, User) \
                 .where(
-                    SummaryData.summary_date is not None,
-                    SummaryData.message_id is not None) \
-                .all()
-            await asyncio.gather(*[
-                SummaryForm(data.message.user, data).update_message(update, context)
-                for data in summary_datas
-                if data.message_id is not None
-            ])
+                    SummaryData.summary_date,
+                    SummaryData.message_id == Message.id,
+                    Message.user_id == User.id)
+
+            summary_gather = [
+                SummaryForm(user, data).update_message(update, context)
+                for data, user in (await session.execute(stmt)).unique()
+                if data.message is not None
+            ]
+
+            await asyncio.gather(*appointment_gather, *summary_gather)
 
 
 @auth_user_middleware
@@ -140,7 +144,11 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = context.user_data
     auth_user = user_data['auth_user']
     if auth_user:
-        message_form = ReminderForm(auth_user)
+        data = ReminderData()
+        session.add(data)
+        await session.commit()
+
+        message_form = ReminderForm(auth_user, data)
         await message_form.reply(update, context)
 
         user_data['message_form'] = message_form
@@ -150,28 +158,30 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def my(update: Update, context: ContextTypes.DEFAULT_TYPE):
     auth_user = context.user_data['auth_user']
 
-    stmt = select(Message, AppointmentData) \
-        .filter(
-            Message.id == AppointmentData.message_id,
-            Message.user_id == auth_user.id) \
+    stmt = select(AppointmentData, User) \
+        .where(
+            AppointmentData.expired == False,
+            AppointmentData.message_id == Message.id,
+            Message.user_id == User.id == auth_user.id,
+            AppointmentData.id == Appointment.data_id) \
         .order_by(
             AppointmentData.book_date,
             AppointmentData.book_time)
 
-    active_datas = [data
-        for message, data in session.execute(stmt).fetchall()
-        if not data.expired and bool(data.appointments)
-    ]
-
+    active_datas = (await session.execute(stmt)).unique().fetchall()
     if active_datas:
         # Close old forms
-        await asyncio.gather(*[
-            AppointmentForm(data.message.user, data).close(0, context.bot)
-            for data in active_datas
+        closed_forms = asyncio.gather(*[
+            AppointmentForm(user, data).close(0, context.bot)
+            for data, user in active_datas
         ])
+
         # Reply new forms concurrently
-        for data in active_datas:
-            await AppointmentForm(data.message.user, data).reply(update, context)
+        for data, user in active_datas:
+            await asyncio.create_task(
+                AppointmentForm(user, data).reply(update, context))
+
+        await closed_forms
     else:
         await update.effective_message.reply_text(
             text='На данный момент нет действующих записей'
@@ -185,10 +195,9 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     auth_user = user_data['auth_user']
     now_dt = datetime.now()
 
-    print('today')
     data = SummaryData(summary_date=now_dt.date(), state=1)
     session.add(data)
-    session.commit()
+    await session.commit()
 
     summary_form = SummaryForm(auth_user, data)
     await summary_form.reply(update, context)
@@ -201,43 +210,14 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = context.user_data
     auth_user = user_data['auth_user']
 
-    summary_form = SummaryForm(auth_user)
+    data = SummaryData()
+    session.add(data)
+    await session.commit()
+
+    summary_form = SummaryForm(auth_user, data)
     await summary_form.reply(update, context)
+
     user_data['message_form'] = summary_form
-
-
-# Reference: https://docs.python-telegram-bot.org/en/v20.0a4/examples.errorhandlerbot.html
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """Log the error and send a telegram message to notify the developer."""
-    # Log the error before we do anything else, so we can see it even if something breaks.
-    logger.error(msg="Exception while handling an update:", exc_info=context.error)
-
-    # traceback.format_exception returns the usual python message about an exception, but as a
-    # list of strings rather than a single string, so we have to join them together.
-    tb_list = traceback.format_exception(None, context.error, context.error.__traceback__)
-    tb_string = "".join(tb_list)
-
-    # Build the message with some markup and additional information about what happened.
-    # You might need to add some logic to deal with messages longer than the 4096 character limit.
-    update_str = update.to_dict() if isinstance(update, Update) else str(update)
-    message = (
-        f"An exception was raised while handling an update\n"
-        f"<pre>update = {html.escape(json.dumps(update_str, indent=2, ensure_ascii=False))}"
-        "</pre>\n\n"
-        f"<pre>context.chat_data = {html.escape(str(context.chat_data))}</pre>\n\n"
-        f"<pre>context.user_data = {html.escape(str(context.user_data))}</pre>\n\n"
-        f"<pre>{html.escape(tb_string)}</pre>"
-    )
-
-    stmt = select(User).where(User.username == os.environ['DEVELOPER_USERNAME'])
-    user = session.scalars(stmt).one_or_none()
-    if user:
-        # Finally, send the message
-        await context.bot.send_message(
-            chat_id=user.chat_id,
-            text=message,
-            parse_mode=ParseMode.HTML
-        )
 
 
 user_handlers = [

@@ -1,6 +1,5 @@
 
 import asyncio
-import functools
 from abc import abstractmethod
 from typing import Union
 
@@ -26,60 +25,85 @@ class BaseAction:
         self.item_text = item_text
         self.action_text = action_text
 
-    def reply_markup(self, user: User, data: BaseData, state: int):
+    async def reply_markup(self, user: User, data: BaseData, state: int):
         pass
 
     def item_stringify(self, data: BaseData):
         pass
 
-    def button_handler(self, user: User, data: BaseData, value: str) -> tuple[bool, str]:
+    async def button_handler(self, user: User, data: BaseData, value: str) -> tuple[bool, str]:
         pass
 
     @staticmethod
-    def is_available_slot(user: User, data: BaseData, value: str):
+    async def is_available_slot(user: User, data: BaseData, value: str):
         pass
 
 
 class BaseForm:
     actions = []
 
+    __data_class__ = None
+
     finished_text = None
     passed_text = None
     closed_text = None
 
-    def __init__(self, user: User, data: BaseData):
+    def __init__(self, user: User, data: BaseData = None):
         self.user = user
         self.data = data
-        self.message = data.message if data.message else None
 
         self.passed = False
         self.closed = False
         self.error_text = None
 
+    @property
+    def message(self):
+        return self.data.message
+
+    @message.setter
+    def message(self, value):
+        self.data.message = value
+
     @abstractmethod
-    def find_exists_datas(self, data: BaseData):
+    async def find_exists_datas(self, data: BaseData):
         pass
 
     def allocate_data_if_necessary(func):
-        @functools.wraps(func)
         async def wrapper(self, *args, **kwargs) -> None:
             context = args[1]
-            datas = self.find_exists_datas(self.data)
+            datas = await self.find_exists_datas(self.data)
             if datas:
                 for data in datas:
                     data.allocate_to(self.data)  # 1. Provide to self.data
-                session.commit()
-                await func(self, *args, **kwargs)
-                await asyncio.gather(*[
+                await session.commit()
+                await session.refresh(self.data)
+
+                result = await func(self, *args, **kwargs)
+
+                await asyncio.gather(*[  # 2. Refresh old datas before close forms
+                    session.refresh(data)
+                    for data in datas
+                ])
+
+                closed_forms = [
                     # Derived class
                     self.__class__(self.user, data).close(0, context.bot)
                     for data in datas
-                ])
-                for data in datas:
-                    session.delete(data)  # 2. Remove other datas
-                session.commit()
+                    if data != self.data
+                ]
+
+                removed_datas = [
+                    session.delete(data)  # 3. Remove old datas
+                    for data in datas
+                    if data != self.data
+                ]
+
+                await asyncio.gather(*closed_forms, *removed_datas)
+                await session.commit()
+
+                return result
             else:
-                await func(self, *args, **kwargs)
+                return await func(self, *args, **kwargs)
         return wrapper
 
     @property
@@ -92,8 +116,6 @@ class BaseForm:
             return '🚫 ' + self.error_text
         elif self.passed:
             return '📅 ' + self.passed_text
-        elif self.closed:
-            return '⌛ ' + self.closed_text
         elif self.finished:
             return '✅ ' + self.finished_text
         else:
@@ -110,15 +132,15 @@ class BaseForm:
         update, context = context.job.data
         await update.effective_message.edit_text(
             parse_mode='Markdown',
-            text=self.text(),
-            reply_markup=self.reply_markup()
+            text=await self.text(),
+            reply_markup=await self.reply_markup()
         )
 
     def fill_kwargs(func):
         async def wrapper(self, *args, **kwargs):
             if issubclass(self.active_action.__class__, BaseMessage):
                 kwargs['parse_mode'] = self.active_action.parse_mode
-            await func(self, *args, **kwargs)
+            return await func(self, *args, **kwargs)
         return wrapper
 
     @fill_kwargs
@@ -131,19 +153,19 @@ class BaseForm:
             await bot.edit_message_text(
                 chat_id=self.user.chat_id,
                 message_id=self.message.id,
-                text=self.text(),
+                text=await self.text(),
                 parse_mode=kwargs.get('parse_mode') or 'Markdown')
         except TelegramError as e:  # Message is not modified ...
             pass
 
-    def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE, value: str):
-        result, error_text = self.active_action \
+    async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE, value: str):
+        result, error_text = await self.active_action \
             .button_handler(self.user, self.data, value)
         print('button_handler', self.data.state, value, self.data)
         if result:
             if self.data.state < len(self.actions) - 1:
                 self.data.state += 1
-                session.commit()
+                await session.commit()
         elif error_text:
             self.error_text = error_text
             context.job_queue.run_once(
@@ -154,29 +176,34 @@ class BaseForm:
 
     @fill_kwargs
     @allocate_data_if_necessary
-    async def reply(self, update: Update, context: ContextTypes.DEFAULT_TYPE, **kwargs) -> None:
+    async def reply(self, update: Update, context: ContextTypes.DEFAULT_TYPE, **kwargs):
+        await session.refresh(self.data)
         msg = await update.effective_message.reply_text(
             parse_mode=kwargs.get('parse_mode') or 'Markdown',
-            text=self.text(),
-            reply_markup=self.reply_markup())
+            text=await self.text(),
+            reply_markup=await self.reply_markup())
 
-        self.message = Message(id=msg.id, user=self.user)
-        self.data.message = self.message
+        self.message = Message(id=msg.id, user_id=self.user.id)
         session.add(self.message)
-        session.commit()
+        await session.commit()
 
-    def text(self):
-        return \
-            f'{self.title_text}\n\n' + \
-            '\n'.join([
-                f'{action.item_text}: ' + \
-                    (f'*{action.item_stringify(self.data)}*' if i < self.data.state or self.finished else "...")
-                for i, action in enumerate(self.actions)
-            ])
+    async def text(self):
+        if self.closed:
+            return '⌛'
+        elif issubclass(self.active_action.__class__, BaseMessage):
+            return await self.active_action.text(self.data)
+        else:
+            return \
+                f'{self.title_text}\n\n' + \
+                '\n'.join([
+                    f'{action.item_text}: ' + \
+                        (f'*{action.item_stringify(self.data)}*' if i < self.data.state or self.finished else "...")
+                    for i, action in enumerate(self.actions)
+                ])
 
-    def reply_markup(self):
+    async def reply_markup(self):
         if not self.closed and issubclass(self.active_action.__class__, BaseAction):
-            return self.active_action.reply_markup(self.user, self.data, self.data.state)
+            return await self.active_action.reply_markup(self.user, self.data, self.data.state)
         else:
             return None
 
@@ -184,11 +211,12 @@ class BaseForm:
     @allocate_data_if_necessary  # Update arg is necessary for allocate_data_if_necessary
     async def update_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE, **kwargs) -> None:
         try:
+            await session.refresh(self.data)
             return await context.bot.edit_message_text(
                 chat_id=self.user.chat_id,
                 message_id=self.message.id,
-                text=self.text(),
+                text=await self.text(),
                 parse_mode=kwargs.get('parse_mode') or 'Markdown',
-                reply_markup=self.reply_markup())
+                reply_markup=await self.reply_markup())
         except TelegramError as e:
             pass

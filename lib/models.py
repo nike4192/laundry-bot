@@ -1,15 +1,20 @@
 
+import asyncio
 from datetime import datetime
-from sqlalchemy import Column, ForeignKey, Date, Time, DateTime, Integer, String, Boolean, Enum, create_engine
-from sqlalchemy.orm import declarative_base, relationship, Session, declared_attr
+from sqlalchemy import Column, ForeignKey, Date, Time, Integer, String, Boolean, Enum
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker, declared_attr
 from sqlalchemy.ext.hybrid import hybrid_property
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy import func
+
 from lib.constants import UserRole
 
-engine = create_engine('sqlite:///db/laundry.db')
-session = Session(engine)
+engine = create_async_engine('sqlite+aiosqlite:///db/laundry.db')
+async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+session = None
 
 Base = declarative_base()
+
 
 class User(Base):
     __tablename__ = 'users'
@@ -23,8 +28,8 @@ class User(Base):
     role = Column(Enum(UserRole), default=UserRole.user)
 
     messages = relationship("Message", back_populates="user")
-    appointments = relationship("Appointment", back_populates="user", lazy="dynamic")
-    reminders = relationship("Reminder", back_populates="user", lazy="dynamic")
+    appointments = relationship("Appointment", back_populates="user", lazy="joined")
+    reminders = relationship("Reminder", back_populates="user")  # , lazy="dynamic")
 
     def __repr__(self):
         return f'User(id={self.id!r}, first_name={self.first_name!r}, last_name={self.last_name!r}, order_number={self.order_number!r})'
@@ -46,7 +51,7 @@ class BaseData(Base):
 
     @declared_attr
     def message(self):
-        return relationship("Message", uselist=False)
+        return relationship("Message", uselist=False, lazy='joined')
 
 
 class AppointmentData(BaseData):
@@ -58,18 +63,23 @@ class AppointmentData(BaseData):
     book_date = Column(Date)
     book_time = Column(Time)
 
-    # __table_args__  = (
-    #     UniqueConstraint('book_date', 'book_time', 'state', name='data_uc'),
-    # )
+    appointments = relationship("Appointment", back_populates="data", lazy='joined')
 
-    appointments = relationship("Appointment", back_populates="data")
+    # __mapper_args__ = {"eager_defaults": True}
 
-    @property
+    @hybrid_property
     def expired(self):
         now_dt = datetime.now()
         return \
             self.book_date and self.book_time and \
             now_dt > datetime.combine(self.book_date, self.book_time)
+
+    @expired.expression
+    def expired(cls):
+        now_dt = datetime.now()
+        return \
+            cls.book_date and cls.book_time and \
+            now_dt > func.datetime(cls.book_date, cls.book_time)
 
     @property
     def washers(self):
@@ -80,6 +90,9 @@ class AppointmentData(BaseData):
         for appointment in self.appointments:
             appointment.data_id = other_data.id
 
+    def __repr__(self):
+        return f'AppointemntData(id={self.id!r}, message_id={self.message_id})'
+
 
 class ReminderData(BaseData):
     __tablename__ = 'reminder_data'
@@ -87,7 +100,9 @@ class ReminderData(BaseData):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-    reminders = relationship("Reminder", back_populates="data")
+    reminders = relationship("Reminder", back_populates="data", lazy='joined')
+
+    # __mapper_args__ = {"eager_defaults": True}
 
     def allocate_to(self, other_data):  # Provide relationship models to other data
         for reminder in self.reminders:
@@ -111,7 +126,7 @@ class Message(Base):
 
     id = Column(Integer, primary_key=True)
 
-    user_id = Column(Integer, ForeignKey('users.id'), nullable=False)
+    user_id = Column(Integer, ForeignKey('users.id'), primary_key=True, nullable=False)
     user = relationship("User", back_populates="messages", uselist=False)
 
     def __repr__(self):
@@ -137,7 +152,7 @@ class Appointment(Base):
     id = Column(Integer, primary_key=True)
     book_date = Column(Date)
     book_time = Column(Time)
-    rejected_at = Column(DateTime)
+    # rejected_at = Column(DateTime)
 
     @hybrid_property
     def book_datetime(self):
@@ -148,10 +163,15 @@ class Appointment(Base):
     def book_datetime(cls):
         return func.datetime(cls.book_date, cls.book_time)
 
-    @property
+    @hybrid_property
     def passed(self):
         now_dt = datetime.now()
         return now_dt > datetime.combine(self.book_date, self.book_time)
+
+    @passed.expression
+    def passed(cls):
+        now_dt = datetime.now()
+        return now_dt > cls.book_datetime
 
     data_id = Column(Integer, ForeignKey("appointment_data.id"), nullable=False)
     data = relationship("AppointmentData", back_populates="appointments")
@@ -160,10 +180,10 @@ class Appointment(Base):
     user = relationship("User", back_populates="appointments")
 
     washer_id = Column(Integer, ForeignKey('washers.id'), nullable=False)
-    washer = relationship('Washer', back_populates='appointments')
+    washer = relationship('Washer', lazy='joined')
 
     def __repr__(self):
-        return f'Appointment(id={self.id}, user_id={self.user_id}, book_date={self.book_date}, book_time={self.book_time}, washer_id={self.washer_id})';
+        return f'Appointment(id={self.id}, data_id={self.data_id}, user_id={self.user_id}, book_date={self.book_date}, book_time={self.book_time}, washer_id={self.washer_id})';
 
 
 class Washer(Base):
@@ -173,6 +193,22 @@ class Washer(Base):
     name = Column(String(30))
     available = Column(Boolean, default=True)
 
-    appointments = relationship('Appointment', back_populates="washer")
+    # appointments = relationship('Appointment', back_populates="washer")
 
-Base.metadata.create_all(engine)
+    def __repr__(self):
+        return f'Washer(id={self.id}, name={self.name}, available={self.available})';
+
+async def get_session():
+    async with async_session() as session:
+        return session
+
+async def main():
+    global session
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session = await get_session()
+
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+asyncio.run(main())

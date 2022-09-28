@@ -1,4 +1,6 @@
 
+from sqlalchemy.orm import selectinload
+
 from lib.forms.appointment import AppointmentForm
 from lib.forms.reminder import ReminderForm
 from lib.forms.summary import SummaryForm
@@ -13,8 +15,12 @@ def auth_user_middleware(func):
         update, context, locale = args[:3]
         user_data = context.user_data
         if not user_data.get('auth_user'):
-            stmt = select(User).where(User.chat_id == update.effective_message.chat_id)
-            auth_user = session.scalars(stmt).one_or_none()
+            stmt = select(User) \
+                .where(
+                    User.chat_id == update.effective_message.chat_id) \
+                .options(
+                    selectinload(User.appointments))
+            auth_user = (await session.scalars(stmt)).unique().one_or_none()
             if auth_user:
                 user_data['auth_user'] = auth_user
             else:
@@ -39,20 +45,15 @@ def message_form_middleware(func):
         if auth_user and (
             not user_data.get('message_form') or  # Not message_form
             user_data['message_form'].message.id != msg_id):  # message_form not for current message
-            for FormData in [AppointmentData, ReminderData, SummaryData]:
-                stmt = select(FormData).filter(
-                    FormData.message_id == msg_id
-                )
-                data = session.scalars(stmt).one_or_none()
+            for MessageForm in [AppointmentForm, ReminderForm, SummaryForm]:
+                FormData = MessageForm.__data_class__
+                stmt = select(FormData) \
+                    .where(
+                        FormData.message_id == msg_id)
+                data = (await session.scalars(stmt)).unique().one_or_none()
                 if data:
-                    if FormData == AppointmentData:
-                        user_data['message_form'] = AppointmentForm(auth_user, data)
-                    if FormData == ReminderData:
-                        user_data['message_form'] = ReminderForm(auth_user, data)
-                    if FormData == SummaryData:
-                        user_data['message_form'] = SummaryForm(auth_user, data)
+                    user_data['message_form'] = MessageForm(auth_user, data)
                     break
-                # print('message_form_middleware', msg_id, data)
         return await func(*args, **kwargs)
     return wrapper
 

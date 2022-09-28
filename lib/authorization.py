@@ -3,16 +3,16 @@ from sqlalchemy import select
 
 from typing import Union
 import lib.constants as const
-from lib.models import User, session
+from lib.models import User, async_session, session
 
 
-def authorize(first_name, last_name, order_number, username, chat_id) -> tuple[Union[User, None], int]:
+async def authorize(first_name, last_name, order_number, username, chat_id) -> tuple[Union[User, None], int]:
     stmt = select(User).where(
         User.first_name == first_name,
         User.last_name == last_name,
         User.order_number == order_number)
 
-    auth_user = session.scalars(stmt).one_or_none()
+    auth_user = (await session.scalars(stmt)).unique().one_or_none()
     if auth_user:
         if auth_user.chat_id:
             if auth_user.chat_id == chat_id:
@@ -22,7 +22,7 @@ def authorize(first_name, last_name, order_number, username, chat_id) -> tuple[U
         else:
             auth_user.username = username
             auth_user.chat_id = chat_id
-            session.commit()
+            async_session.commit()
             return auth_user, const.AUTH_SUCCESSFUL
     else:
         return None, const.AUTH_NOT_FOUND

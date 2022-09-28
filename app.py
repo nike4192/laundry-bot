@@ -1,27 +1,35 @@
 
+import os
+import logging
+import asyncio
+
 from dotenv import load_dotenv
 load_dotenv()  # TZ Important
 
 import time
-time.tzset()
+time.tzset()  # Set timezone
 
-from lib.handlers import error_handler, user_handlers
-
-import os
-import logging
+from lib.handlers import user_handlers
 from telegram.ext import ApplicationBuilder
 
 
-BOT_TOKEN = os.environ['BOT_TOKEN']
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 
-application = ApplicationBuilder().token(BOT_TOKEN).build()
+application = ApplicationBuilder() \
+    .token(os.environ['BOT_TOKEN']) \
+    .build()
+
+
+def main():
+    application.add_handlers(user_handlers)
+    application.run_polling()
+
 
 if __name__ == '__main__':
-    application.add_handlers(user_handlers)
-    # application.add_error_handler(error_handler)
-    application.run_polling()
+    main()
