@@ -4,7 +4,8 @@ from abc import abstractmethod
 from typing import Union
 
 import lib.constants as const
-from lib.models import session, User, BaseData, Message
+from lib.models import User, BaseData, Message
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from telegram import Update
 from telegram.error import TelegramError
@@ -35,7 +36,7 @@ class BaseAction:
         pass
 
     @staticmethod
-    async def is_available_slot(user: User, data: BaseData, value: str):
+    async def is_available_slot(session: AsyncSession, user: User, data: BaseData, value: str):
         pass
 
 
@@ -65,13 +66,14 @@ class BaseForm:
         self.data.message = value
 
     @abstractmethod
-    async def find_exists_datas(self, data: BaseData):
+    async def find_exists_datas(self, session: AsyncSession, data: BaseData):
         pass
 
     def allocate_data_if_necessary(func):
         async def wrapper(self, *args, **kwargs) -> None:
             context = args[1]
-            datas = await self.find_exists_datas(self.data)
+            session = context.bot_data['session']
+            datas = await self.find_exists_datas(session, self.data)
             if datas:
                 for data in datas:
                     data.allocate_to(self.data)  # 1. Provide to self.data
@@ -159,8 +161,9 @@ class BaseForm:
             pass
 
     async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE, value: str):
+        session = context.bot_data['session']
         result, error_text = await self.active_action \
-            .button_handler(self.user, self.data, value)
+            .button_handler(session, self.user, self.data, value)
         print('button_handler', self.data.state, value, self.data)
         if result:
             if self.data.state < len(self.actions) - 1:
@@ -177,6 +180,7 @@ class BaseForm:
     @fill_kwargs
     @allocate_data_if_necessary
     async def reply(self, update: Update, context: ContextTypes.DEFAULT_TYPE, **kwargs):
+        session = context.bot_data['session']
         await session.refresh(self.data)
         msg = await update.effective_message.reply_text(
             parse_mode=kwargs.get('parse_mode') or 'Markdown',
@@ -211,6 +215,7 @@ class BaseForm:
     @allocate_data_if_necessary  # Update arg is necessary for allocate_data_if_necessary
     async def update_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE, **kwargs) -> None:
         try:
+            session = context.bot_data['session']
             await session.refresh(self.data)
             return await context.bot.edit_message_text(
                 chat_id=self.user.chat_id,
