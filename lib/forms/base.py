@@ -4,7 +4,8 @@ from abc import abstractmethod
 from typing import Union
 
 import lib.constants as const
-from lib.models import session, User, BaseData, Message
+from lib.models import User, BaseData, Message
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from telegram import Update
 from telegram.error import TelegramError
@@ -16,7 +17,7 @@ class BaseMessage:
     parse_mode = None
 
     @abstractmethod
-    def text(self, data: BaseData):
+    def text(self, session: AsyncSession, data: BaseData):
         pass
 
 
@@ -25,17 +26,17 @@ class BaseAction:
         self.item_text = item_text
         self.action_text = action_text
 
-    async def reply_markup(self, user: User, data: BaseData, state: int):
+    async def reply_markup(self, session: AsyncSession, user: User, data: BaseData, state: int):
         pass
 
     def item_stringify(self, data: BaseData):
         pass
 
-    async def button_handler(self, user: User, data: BaseData, value: str) -> tuple[bool, str]:
+    async def button_handler(self, session: AsyncSession, user: User, data: BaseData, value: str) -> tuple[bool, str]:
         pass
 
     @staticmethod
-    async def is_available_slot(user: User, data: BaseData, value: str):
+    async def is_available_slot(session: AsyncSession, user: User, data: BaseData, value: str):
         pass
 
 
@@ -44,15 +45,14 @@ class BaseForm:
 
     __data_class__ = None
 
-    finished_text = None
-    passed_text = None
     closed_text = None
+    finished_text = None
 
-    def __init__(self, user: User, data: BaseData = None):
+    def __init__(self, session: AsyncSession, user: User, data: BaseData = None):
+        self.session = session
         self.user = user
         self.data = data
 
-        self.passed = False
         self.closed = False
         self.error_text = None
 
@@ -65,13 +65,14 @@ class BaseForm:
         self.data.message = value
 
     @abstractmethod
-    async def find_exists_datas(self, data: BaseData):
+    async def find_exists_datas(self, session: AsyncSession, data: BaseData):
         pass
 
     def allocate_data_if_necessary(func):
         async def wrapper(self, *args, **kwargs) -> None:
             context = args[1]
-            datas = await self.find_exists_datas(self.data)
+            session = context.bot_data['session']
+            datas = await self.find_exists_datas(session, self.data)
             if datas:
                 for data in datas:
                     data.allocate_to(self.data)  # 1. Provide to self.data
@@ -87,7 +88,8 @@ class BaseForm:
 
                 closed_forms = [
                     # Derived class
-                    self.__class__(self.user, data).close(0, context.bot)
+                    self.__class__(session, self.user, data) \
+                        .close(const.MESSAGE_IS_NOT_RELEVANT, context.bot)
                     for data in datas
                     if data != self.data
                 ]
@@ -114,8 +116,6 @@ class BaseForm:
     def title_text(self) -> str:
         if self.error_text:
             return '🚫 ' + self.error_text
-        elif self.passed:
-            return '📅 ' + self.passed_text
         elif self.finished:
             return '✅ ' + self.finished_text
         else:
@@ -145,10 +145,8 @@ class BaseForm:
 
     @fill_kwargs
     async def close(self, reason: int, bot, **kwargs) -> None:
-        if reason == 0:
+        if reason == const.MESSAGE_IS_NOT_RELEVANT:
             self.closed = True
-        elif reason == 1:
-            self.passed = True
         try:
             await bot.edit_message_text(
                 chat_id=self.user.chat_id,
@@ -159,8 +157,9 @@ class BaseForm:
             pass
 
     async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE, value: str):
+        session = context.bot_data['session']
         result, error_text = await self.active_action \
-            .button_handler(self.user, self.data, value)
+            .button_handler(session, self.user, self.data, value)
         print('button_handler', self.data.state, value, self.data)
         if result:
             if self.data.state < len(self.actions) - 1:
@@ -177,6 +176,7 @@ class BaseForm:
     @fill_kwargs
     @allocate_data_if_necessary
     async def reply(self, update: Update, context: ContextTypes.DEFAULT_TYPE, **kwargs):
+        session = context.bot_data['session']
         await session.refresh(self.data)
         msg = await update.effective_message.reply_text(
             parse_mode=kwargs.get('parse_mode') or 'Markdown',
@@ -191,7 +191,7 @@ class BaseForm:
         if self.closed:
             return '⌛'
         elif issubclass(self.active_action.__class__, BaseMessage):
-            return await self.active_action.text(self.data)
+            return await self.active_action.text(self.session, self.data)
         else:
             return \
                 f'{self.title_text}\n\n' + \
@@ -203,7 +203,7 @@ class BaseForm:
 
     async def reply_markup(self):
         if not self.closed and issubclass(self.active_action.__class__, BaseAction):
-            return await self.active_action.reply_markup(self.user, self.data, self.data.state)
+            return await self.active_action.reply_markup(self.session, self.user, self.data, self.data.state)
         else:
             return None
 
@@ -211,6 +211,7 @@ class BaseForm:
     @allocate_data_if_necessary  # Update arg is necessary for allocate_data_if_necessary
     async def update_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE, **kwargs) -> None:
         try:
+            session = context.bot_data['session']
             await session.refresh(self.data)
             return await context.bot.edit_message_text(
                 chat_id=self.user.chat_id,

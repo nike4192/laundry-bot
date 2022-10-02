@@ -1,7 +1,6 @@
 
 import re
 import asyncio
-import logging
 from datetime import datetime
 
 import lib.constants as const
@@ -9,7 +8,7 @@ from lib.misc import append_locale_arg
 from lib.forms.appointment import AppointmentForm
 from lib.forms.reminder import ReminderForm
 from lib.forms.summary import SummaryForm
-from lib.models import session, User, Message, AppointmentData, SummaryData, UserRole, ReminderData, Appointment
+from lib.models import User, Message, AppointmentData, SummaryData, UserRole, ReminderData, Appointment
 from lib.middlewares import auth_user_middleware, message_form_middleware, user_permission_middleware
 from lib.authorization import authorize
 
@@ -17,8 +16,6 @@ from sqlalchemy import select
 
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler, MessageHandler, filters
-
-logger = logging.getLogger(__name__)
 
 
 @auth_user_middleware
@@ -39,6 +36,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @auth_user_middleware
 async def book(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    session = context.bot_data['session']
     user_data = context.user_data
     auth_user = user_data['auth_user']
     if auth_user:
@@ -46,7 +44,7 @@ async def book(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.add(data)
         await session.commit()
 
-        message_form = AppointmentForm(auth_user, data)
+        message_form = AppointmentForm(session, auth_user, data)
         await message_form.reply(update, context)
 
         user_data['message_form'] = message_form
@@ -71,8 +69,10 @@ async def auth(update: Update, context: ContextTypes.DEFAULT_TYPE, locale: dict)
             text=locale['action_text'].format(cmd_='')
         )
 
+    session = context.bot_data['session']
     order_number = auth_user_args[-1]
     auth_user, reason = await authorize(
+        session,
         first_name, last_name, order_number,
         from_user.username, update.effective_message.chat_id)
 
@@ -101,6 +101,7 @@ async def message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @auth_user_middleware
 @message_form_middleware
 async def callback_query_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    session = context.bot_data['session']
     message_form = context.user_data['message_form']
     query = update.callback_query
     await query.answer()
@@ -120,18 +121,17 @@ async def callback_query_button(update: Update, context: ContextTypes.DEFAULT_TY
                 Message.user_id == User.id)
 
             appointment_gather = [
-                AppointmentForm(user, data).update_message(update, context)
+                AppointmentForm(session, user, data).update_message(update, context)
                 for data, user in (await session.execute(stmt)).unique()
             ]
             # Update summary forms for moderators
             stmt = select(SummaryData, User) \
                 .where(
-                    SummaryData.summary_date,
                     SummaryData.message_id == Message.id,
                     Message.user_id == User.id)
 
             summary_gather = [
-                SummaryForm(user, data).update_message(update, context)
+                SummaryForm(session, user, data).update_message(update, context)
                 for data, user in (await session.execute(stmt)).unique()
                 if data.message is not None
             ]
@@ -141,6 +141,7 @@ async def callback_query_button(update: Update, context: ContextTypes.DEFAULT_TY
 
 @auth_user_middleware
 async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    session = context.bot_data['session']
     user_data = context.user_data
     auth_user = user_data['auth_user']
     if auth_user:
@@ -148,7 +149,7 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.add(data)
         await session.commit()
 
-        message_form = ReminderForm(auth_user, data)
+        message_form = ReminderForm(session, auth_user, data)
         await message_form.reply(update, context)
 
         user_data['message_form'] = message_form
@@ -156,14 +157,16 @@ async def remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @auth_user_middleware
 async def my(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    session = context.bot_data['session']
     auth_user = context.user_data['auth_user']
 
     stmt = select(AppointmentData, User) \
         .where(
+            AppointmentData.id == Appointment.data_id,
             AppointmentData.expired == False,
             AppointmentData.message_id == Message.id,
-            Message.user_id == User.id == auth_user.id,
-            AppointmentData.id == Appointment.data_id) \
+            Message.user_id == User.id,
+            User.id == auth_user.id) \
         .order_by(
             AppointmentData.book_date,
             AppointmentData.book_time)
@@ -172,14 +175,14 @@ async def my(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if active_datas:
         # Close old forms
         closed_forms = asyncio.gather(*[
-            AppointmentForm(user, data).close(0, context.bot)
+            AppointmentForm(session, user, data).close(const.MESSAGE_IS_NOT_RELEVANT, context.bot)
             for data, user in active_datas
         ])
 
         # Reply new forms concurrently
         for data, user in active_datas:
             await asyncio.create_task(
-                AppointmentForm(user, data).reply(update, context))
+                AppointmentForm(session, user, data).reply(update, context))
 
         await closed_forms
     else:
@@ -191,6 +194,7 @@ async def my(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @auth_user_middleware
 @user_permission_middleware(UserRole.moderator)
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    session = context.bot_data['session']
     user_data = context.user_data
     auth_user = user_data['auth_user']
     now_dt = datetime.now()
@@ -199,7 +203,7 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session.add(data)
     await session.commit()
 
-    summary_form = SummaryForm(auth_user, data)
+    summary_form = SummaryForm(session, auth_user, data)
     await summary_form.reply(update, context)
     user_data['message_form'] = summary_form
 
@@ -207,6 +211,7 @@ async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @auth_user_middleware
 @user_permission_middleware(UserRole.moderator)
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    session = context.bot_data['session']
     user_data = context.user_data
     auth_user = user_data['auth_user']
 
@@ -214,7 +219,7 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session.add(data)
     await session.commit()
 
-    summary_form = SummaryForm(auth_user, data)
+    summary_form = SummaryForm(session, auth_user, data)
     await summary_form.reply(update, context)
 
     user_data['message_form'] = summary_form

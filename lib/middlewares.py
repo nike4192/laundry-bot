@@ -5,7 +5,7 @@ from lib.forms.appointment import AppointmentForm
 from lib.forms.reminder import ReminderForm
 from lib.forms.summary import SummaryForm
 from lib.misc import append_locale_arg
-from lib.models import session, UserRole, User, AppointmentData, ReminderData, SummaryData
+from lib.models import UserRole, User
 from sqlalchemy import select
 
 
@@ -13,6 +13,7 @@ def auth_user_middleware(func):
     @append_locale_arg()
     async def wrapper(*args, **kwargs):
         update, context, locale = args[:3]
+        session = context.bot_data['session']
         user_data = context.user_data
         if not user_data.get('auth_user'):
             stmt = select(User) \
@@ -38,6 +39,7 @@ def auth_user_middleware(func):
 def message_form_middleware(func):
     async def wrapper(*args, **kwargs):
         update, context = args
+        session = context.bot_data['session']
         user_data = context.user_data
         auth_user = user_data['auth_user']
         msg_id = update.effective_message.id
@@ -52,7 +54,7 @@ def message_form_middleware(func):
                         FormData.message_id == msg_id)
                 data = (await session.scalars(stmt)).unique().one_or_none()
                 if data:
-                    user_data['message_form'] = MessageForm(auth_user, data)
+                    user_data['message_form'] = MessageForm(session, auth_user, data)
                     break
         return await func(*args, **kwargs)
     return wrapper

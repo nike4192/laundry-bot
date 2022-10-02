@@ -1,17 +1,21 @@
-
-import asyncio
+import os
 from datetime import datetime
-from sqlalchemy import Column, ForeignKey, Date, Time, Integer, String, Boolean, Enum
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker, declared_attr
+from sqlalchemy import Column, ForeignKey, Date, Time, Integer, String, Boolean, Enum, create_engine
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker, declared_attr, Session
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.dialects.mysql import BIGINT
 from sqlalchemy import func
 
 from lib.constants import UserRole
 
-engine = create_async_engine('sqlite+aiosqlite:///db/laundry.db')
+mysql_user = os.getenv('MYSQL_USER')
+mysql_password = os.getenv('MYSQL_PASSWORD')
+mysql_host = os.getenv('MYSQL_HOST')
+mysql_db = os.getenv('MYSQL_DB')
+
+engine = create_async_engine(f'mysql+asyncmy://{mysql_user}:{mysql_password}@{mysql_host}/{mysql_db}')
 async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
-session = None
 
 Base = declarative_base()
 
@@ -22,9 +26,9 @@ class User(Base):
     id = Column(Integer, primary_key=True)
     first_name = Column(String(60))
     last_name = Column(String(60))
-    order_number = Column(Integer)
+    order_number = Column(String(30))
     username = Column(String(60))
-    chat_id = Column(Integer)
+    chat_id = Column(BIGINT(unsigned=True))
     role = Column(Enum(UserRole), default=UserRole.user)
 
     messages = relationship("Message", back_populates="user")
@@ -62,10 +66,9 @@ class AppointmentData(BaseData):
 
     book_date = Column(Date)
     book_time = Column(Time)
+    reserved = Column(Boolean, default=False)
 
     appointments = relationship("Appointment", back_populates="data", lazy='joined')
-
-    # __mapper_args__ = {"eager_defaults": True}
 
     @hybrid_property
     def expired(self):
@@ -79,7 +82,7 @@ class AppointmentData(BaseData):
         now_dt = datetime.now()
         return \
             cls.book_date and cls.book_time and \
-            now_dt > func.datetime(cls.book_date, cls.book_time)
+            now_dt > func.timestamp(cls.book_date, cls.book_time)
 
     @property
     def washers(self):
@@ -101,8 +104,6 @@ class ReminderData(BaseData):
         super().__init__(*args, **kwargs)
 
     reminders = relationship("Reminder", back_populates="data", lazy='joined')
-
-    # __mapper_args__ = {"eager_defaults": True}
 
     def allocate_to(self, other_data):  # Provide relationship models to other data
         for reminder in self.reminders:
@@ -161,7 +162,7 @@ class Appointment(Base):
 
     @book_datetime.expression
     def book_datetime(cls):
-        return func.datetime(cls.book_date, cls.book_time)
+        return func.timestamp(cls.book_date, cls.book_time)
 
     @hybrid_property
     def passed(self):
@@ -193,8 +194,6 @@ class Washer(Base):
     name = Column(String(30))
     available = Column(Boolean, default=True)
 
-    # appointments = relationship('Appointment', back_populates="washer")
-
     def __repr__(self):
         return f'Washer(id={self.id}, name={self.name}, available={self.available})';
 
@@ -202,13 +201,6 @@ async def get_session():
     async with async_session() as session:
         return session
 
-async def main():
-    global session
+async def init():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-
-    session = await get_session()
-
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
-asyncio.run(main())

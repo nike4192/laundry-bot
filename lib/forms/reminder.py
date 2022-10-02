@@ -2,11 +2,12 @@
 from datetime import timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
+from sqlalchemy.ext.asyncio import AsyncSession
 
 import locales
 import lib.constants as const
 from lib.forms.base import BaseAction, BaseForm
-from lib.models import session, User, ReminderData, Reminder, Message
+from lib.models import User, ReminderData, Reminder, Message
 from lib.misc import timedelta_to_str
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -16,11 +17,11 @@ class ReminderAction(BaseAction):
     def __init__(self):
         super().__init__('Уведомления', 'Выберите за сколько вас предупредить')
 
-    async def reply_markup(self, user: User, data: ReminderData, state: int):
+    async def reply_markup(self, session: AsyncSession, user: User, data: ReminderData, state: int):
         keyboard = []
         for reminder_td in const.reminder_timedelta:
             total_seconds = int(reminder_td.total_seconds()) # ROUNDING: float -> int
-            _, reason = (await self.is_available_slot(user, data, total_seconds))
+            _, reason = (await self.is_available_slot(session, user, data, total_seconds))
             sign_char = '✅' if reason else None
             keyboard_button = InlineKeyboardButton(
                 (sign_char + ' ' if sign_char else '') + timedelta_to_str(reminder_td),
@@ -30,7 +31,7 @@ class ReminderAction(BaseAction):
         return InlineKeyboardMarkup([keyboard])
 
     @staticmethod
-    async def is_available_slot(user: User, data: ReminderData, value):
+    async def is_available_slot(session: AsyncSession, user: User, data: ReminderData, value):
         stmt = select(Reminder).filter(
             Reminder.seconds == int(value),
             Reminder.user == user
@@ -48,8 +49,8 @@ class ReminderAction(BaseAction):
         else:
             return '...'
 
-    async def button_handler(self, user: User, data: ReminderData, value: str) -> tuple[bool, str]:
-        _, reason = await self.is_available_slot(user, data, value)
+    async def button_handler(self, session: AsyncSession, user: User, data: ReminderData, value: str) -> tuple[bool, str]:
+        _, reason = await self.is_available_slot(session, user, data, value)
 
         if reason:
             stmt = select(Reminder).filter(
@@ -81,10 +82,7 @@ class ReminderForm(BaseForm):
     closed_text = locales.ru['reminder_form']['closed_title']
     finished_text = locales.ru['reminder_form']['finished_title']
 
-    def __init__(self, user: User, data: ReminderData):
-        super().__init__(user, data)
-
-    async def find_exists_datas(self, data: ReminderData):
+    async def find_exists_datas(self, session: AsyncSession, data: ReminderData):
         stmt = select(ReminderData) \
             .where(
                 ReminderData.id != data.id,

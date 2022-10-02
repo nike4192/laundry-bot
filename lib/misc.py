@@ -55,7 +55,7 @@ def gen_available_dates(user_role: UserRole):
 
     available_weekdays = const.available_weekdays[user_role]
     last_t = sorted(const.available_time)[-1]
-    if now_dt.time() > last_t:  # Not available times
+    if now_dt.time() > last_t:  # Not available times today
         d += td
     for i in range(const.available_days):
         while d.weekday() not in available_weekdays:
@@ -85,7 +85,8 @@ def aggregate_appointment_slots(slots: list[tuple[int, int]]):
         (True, const.WASHER_IS_ALREADY_BOOKED),
         (True, const.WASHER_IS_AVAILABLE),
         (False, const.WASHER_IS_ALREADY_BOOKED),
-        (False, const.APPOINTMENT_IS_PASSED)
+        (False, const.APPOINTMENT_IS_PASSED),
+        (False, const.APPOINTMENT_IS_RESERVED)
     ]
 
     for level in levels:
