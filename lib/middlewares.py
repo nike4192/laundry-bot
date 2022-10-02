@@ -44,9 +44,7 @@ def message_form_middleware(func):
         auth_user = user_data['auth_user']
         msg_id = update.effective_message.id
 
-        if auth_user and (
-            not user_data.get('message_form') or  # Not message_form
-            user_data['message_form'].message.id != msg_id):  # message_form not for current message
+        if auth_user:  # message_form not for current message
             for MessageForm in [AppointmentForm, ReminderForm, SummaryForm]:
                 FormData = MessageForm.__data_class__
                 stmt = select(FormData) \

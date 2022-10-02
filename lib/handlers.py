@@ -107,36 +107,35 @@ async def callback_query_button(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
 
     state, value = query.data.split(' ')
-    message_form.data.state = int(state)
-    await message_form.button_handler(update, context, value)
+    await message_form.button_handler(update, context, int(state), value)
     await message_form.update_message(update, context)
 
-    data = message_form.data
-    if isinstance(data, AppointmentData):
-        if data.state == len(message_form.actions) - 1:
-            # Update appointment forms for other users
-            stmt = select(AppointmentData, User).where(
-                AppointmentData.id != data.id,
-                AppointmentData.message_id == Message.id,
-                Message.user_id == User.id)
-
-            appointment_gather = [
-                AppointmentForm(session, user, data).update_message(update, context)
-                for data, user in (await session.execute(stmt)).unique()
-            ]
-            # Update summary forms for moderators
-            stmt = select(SummaryData, User) \
-                .where(
-                    SummaryData.message_id == Message.id,
-                    Message.user_id == User.id)
-
-            summary_gather = [
-                SummaryForm(session, user, data).update_message(update, context)
-                for data, user in (await session.execute(stmt)).unique()
-                if data.message is not None
-            ]
-
-            await asyncio.gather(*appointment_gather, *summary_gather)
+    # data = message_form.data
+    # if isinstance(data, AppointmentData):
+    #     if data.state == len(message_form.actions) - 1:
+    #         # Update appointment forms for other users
+    #         stmt = select(AppointmentData, User).where(
+    #             AppointmentData.id != data.id,
+    #             AppointmentData.message_id == Message.id,
+    #             Message.user_id == User.id)
+    #
+    #         appointment_gather = [
+    #             AppointmentForm(session, user, data).update_message(update, context)
+    #             for data, user in (await session.execute(stmt)).unique()
+    #         ]
+    #         # Update summary forms for moderators
+    #         stmt = select(SummaryData, User) \
+    #             .where(
+    #                 SummaryData.message_id == Message.id,
+    #                 Message.user_id == User.id)
+    #
+    #         summary_gather = [
+    #             SummaryForm(session, user, data).update_message(update, context)
+    #             for data, user in (await session.execute(stmt)).unique()
+    #             if data.message is not None
+    #         ]
+    #
+    #         await asyncio.gather(*appointment_gather, *summary_gather)
 
 
 @auth_user_middleware

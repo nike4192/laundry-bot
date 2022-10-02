@@ -72,6 +72,7 @@ class BaseForm:
         async def wrapper(self, *args, **kwargs) -> None:
             context = args[1]
             session = context.bot_data['session']
+            await session.refresh(self.data)
             datas = await self.find_exists_datas(session, self.data)
             if datas:
                 for data in datas:
@@ -106,6 +107,16 @@ class BaseForm:
                 return result
             else:
                 return await func(self, *args, **kwargs)
+        return wrapper
+
+    def merge_to_session(func):
+        async def wrapper(self, *args, **kwargs):
+            session = self.session
+            if self.data not in session:
+                self.data = await session.merge(self.data)
+                print('MERGED:', self.data)
+                await session.commit()
+            return await func(self, *args, **kwargs)
         return wrapper
 
     @property
@@ -156,8 +167,11 @@ class BaseForm:
         except TelegramError as e:  # Message is not modified ...
             pass
 
-    async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE, value: str):
+    @merge_to_session
+    async def button_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE, state: int, value: str):
         session = context.bot_data['session']
+        await session.refresh(self.data)
+        self.data.state = state
         result, error_text = await self.active_action \
             .button_handler(session, self.user, self.data, value)
         print('button_handler', self.data.state, value, self.data)

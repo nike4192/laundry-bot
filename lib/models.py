@@ -1,6 +1,6 @@
 import os
 from datetime import datetime
-from sqlalchemy import Column, ForeignKey, Date, Time, Integer, String, Boolean, Enum, create_engine
+from sqlalchemy import Column, ForeignKey, Date, Time, Integer, String, Boolean, Enum, create_engine, UniqueConstraint
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker, declared_attr, Session
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
@@ -105,6 +105,9 @@ class ReminderData(BaseData):
 
     reminders = relationship("Reminder", back_populates="data", lazy='joined')
 
+    def __repr__(self):
+        return f'ReminderData(id={self.id!r}, message_id={self.message_id}, reminders_count={len(self.reminders)})'
+
     def allocate_to(self, other_data):  # Provide relationship models to other data
         for reminder in self.reminders:
             reminder.data_id = other_data.id
@@ -182,6 +185,10 @@ class Appointment(Base):
 
     washer_id = Column(Integer, ForeignKey('washers.id'), nullable=False)
     washer = relationship('Washer', lazy='joined')
+
+    __table_args__ = (
+        UniqueConstraint('book_date', 'book_time', 'washer_id', 'user_id'),
+    )
 
     def __repr__(self):
         return f'Appointment(id={self.id}, data_id={self.data_id}, user_id={self.user_id}, book_date={self.book_date}, book_time={self.book_time}, washer_id={self.washer_id})';

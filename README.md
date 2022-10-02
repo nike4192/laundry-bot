@@ -1,7 +1,6 @@
 ## Requirements
-pip install PyYAML
-pip install sqlalchemy
-pip install python-telegram-bot --pre --upgrade
+- RabbitMQ
+- MySQL
 
 ## Environment variables
 - DEVELOPER_USERNAME

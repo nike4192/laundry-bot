@@ -10,6 +10,7 @@ from lib.models import User, AppointmentData, Appointment, Washer, Message
 
 from sqlalchemy import func
 from sqlalchemy.future import select
+from sqlalchemy.orm import make_transient
 from sqlalchemy.ext.asyncio import AsyncSession
 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -174,6 +175,7 @@ class WashersAppointmentAction(BaseAction):
     @append_locale_arg('appointment_form', 'washer_action')
     async def button_handler(self, session: AsyncSession, user: User, data: AppointmentData, value: str, locale: dict) -> tuple[bool, str]:
         is_available, reason, appointment = await self.is_available_slot(session, user, data, value)
+        print('Slot: %s, %s' % (is_available, reason))
 
         if is_available:
             if reason == const.WASHER_IS_AVAILABLE:
@@ -184,17 +186,20 @@ class WashersAppointmentAction(BaseAction):
                 planned_appointments_count = (await session.scalars(stmt)).one()
                 if planned_appointments_count >= const.max_book_washers:
                     return False, locale['max_book_washers'] % const.max_book_washers
-                session.add(
-                    Appointment(
-                        user=user,
-                        data=data,
-                        book_date=data.book_date,
-                        book_time=data.book_time,
-                        washer_id=int(value)))
+                appointment = Appointment(
+                    user_id=user.id,
+                    data_id=data.id,
+                    book_date=data.book_date,
+                    book_time=data.book_time,
+                    washer_id=int(value))
+                print('Add appointment', appointment)
+                make_transient(appointment)
+                session.add(appointment)
                 await session.commit()
                 return True, ''
             elif reason == const.WASHER_IS_ALREADY_BOOKED:
                 await session.delete(appointment)
+                print('Delete appointment', appointment)
                 await session.commit()
                 await session.refresh(data)  # Update relationships
                 return True, ''
